@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app import models, schemas, auth, ml_utils
+from app import models, schemas, auth, ml_utils, aml_rules
 from app.database import Base, engine, get_db
 
 Base.metadata.create_all(bind=engine)
@@ -127,3 +127,25 @@ def predict_fraud(
         "fraud_score": result["fraud_score"],
         "top_features": result["top_features"],
     }
+
+@app.post("/aml/check/{transaction_id}")
+def check_aml_rules(
+    transaction_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    txn = db.query(models.Transaction).filter(models.Transaction.TransactionId == transaction_id).first()
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    alerts = aml_rules.run_all_rules(db, txn)
+
+    for alert in alerts:
+        db.add(models.AMLAlert(
+            TransactionId=transaction_id,
+            RuleTriggered=alert["rule"],
+            Severity=alert["severity"],
+        ))
+    db.commit()
+
+    return {"transaction_id": transaction_id, "alerts_triggered": len(alerts), "alerts": alerts}
