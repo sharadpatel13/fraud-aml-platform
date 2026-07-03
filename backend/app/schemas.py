@@ -24,3 +24,13 @@ class UploadSummary(BaseModel):
     accepted: int
     rejected: int
     errors: list[str] = []
+
+
+class PredictionRequest(BaseModel):
+    transaction_id: int
+
+
+class PredictionResponse(BaseModel):
+    transaction_id: int
+    fraud_score: float
+    top_features: str

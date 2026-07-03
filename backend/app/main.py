@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app import models, schemas, auth
+from app import models, schemas, auth, ml_utils
 from app.database import Base, engine, get_db
 
 Base.metadata.create_all(bind=engine)
@@ -100,3 +100,30 @@ def upload_transactions(
 
     db.commit()
     return {"accepted": accepted, "rejected": rejected, "errors": errors}
+
+
+@app.post("/predict/{transaction_id}", response_model=schemas.PredictionResponse)
+def predict_fraud(
+    transaction_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    txn = db.query(models.Transaction).filter(models.Transaction.TransactionId == transaction_id).first()
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    result = ml_utils.score_transaction(transaction_id, float(txn.Amount))
+
+    score_record = models.FraudScore(
+        TransactionId=transaction_id,
+        FraudScore=result["fraud_score"],
+        TopFeatures=result["top_features"],
+    )
+    db.add(score_record)
+    db.commit()
+
+    return {
+        "transaction_id": transaction_id,
+        "fraud_score": result["fraud_score"],
+        "top_features": result["top_features"],
+    }
