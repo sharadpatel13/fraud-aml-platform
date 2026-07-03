@@ -161,3 +161,26 @@ def investigate_transaction(
 ):
     summary = agent.investigate(db, transaction_id)
     return {"transaction_id": transaction_id, "case_summary": summary}
+
+
+@app.get("/transactions")
+def list_transactions(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    transactions = db.query(models.Transaction).all()
+    result = []
+    for t in transactions:
+        score = (
+            db.query(models.FraudScore)
+            .filter(models.FraudScore.TransactionId == t.TransactionId)
+            .order_by(models.FraudScore.ScoredAt.desc())
+            .first()
+        )
+        alerts = db.query(models.AMLAlert).filter(models.AMLAlert.TransactionId == t.TransactionId).all()
+        result.append({
+            "transaction_id": t.TransactionId,
+            "account_id": t.AccountId,
+            "amount": float(t.Amount),
+            "country_code": t.CountryCode,
+            "fraud_score": float(score.FraudScore) if score else None,
+            "aml_alert_count": len(alerts),
+        })
+    return result
