@@ -11,7 +11,7 @@ conn_str = (
     "Trusted_Connection=yes;"
 )
 
-engine = create_engine("mssql+pyodbc://", creator=lambda: pyodbc.connect(conn_str), echo=True)
+engine = create_engine("mssql+pyodbc://", creator=lambda: pyodbc.connect(conn_str), echo=False)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

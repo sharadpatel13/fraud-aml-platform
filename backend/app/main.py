@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app import models, schemas, auth, ml_utils, aml_rules
+from app import models, schemas, auth, ml_utils, aml_rules, agent 
 from app.database import Base, engine, get_db
 
 Base.metadata.create_all(bind=engine)
@@ -149,3 +149,15 @@ def check_aml_rules(
     db.commit()
 
     return {"transaction_id": transaction_id, "alerts_triggered": len(alerts), "alerts": alerts}
+
+
+
+
+@app.post("/agent/investigate/{transaction_id}")
+def investigate_transaction(
+    transaction_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    summary = agent.investigate(db, transaction_id)
+    return {"transaction_id": transaction_id, "case_summary": summary}
