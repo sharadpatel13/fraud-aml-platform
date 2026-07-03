@@ -34,3 +34,17 @@ class PredictionResponse(BaseModel):
     transaction_id: int
     fraud_score: float
     top_features: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    username: str
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    temporary_password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str

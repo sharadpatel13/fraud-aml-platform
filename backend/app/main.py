@@ -1,5 +1,6 @@
 import csv
 import io
+import secrets
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, status
@@ -159,8 +160,12 @@ def investigate_transaction(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    summary = agent.investigate(db, transaction_id)
-    return {"transaction_id": transaction_id, "case_summary": summary}
+    result = agent.investigate(db, transaction_id)
+    return {
+        "transaction_id": transaction_id,
+        "case_summary": result["report"],
+        "jira_ticket": result["jira_ticket"],
+    }
 
 
 @app.get("/transactions")
@@ -184,3 +189,32 @@ def list_transactions(db: Session = Depends(get_db), current_user: models.User =
             "aml_alert_count": len(alerts),
         })
     return result
+
+
+@app.post("/auth/forgot-password", response_model=schemas.ForgotPasswordResponse)
+def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.Username == payload.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found with that username")
+
+    temp_password = secrets.token_urlsafe(9)
+    user.PasswordHash = auth.hash_password(temp_password)
+    db.commit()
+
+    return {
+        "message": "In production this would be emailed to the account holder. For this demo, it is shown directly.",
+        "temporary_password": temp_password,
+    }
+
+
+@app.post("/auth/change-password")
+def change_password(
+    payload: schemas.ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    if not auth.verify_password(payload.current_password, current_user.PasswordHash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    current_user.PasswordHash = auth.hash_password(payload.new_password)
+    db.commit()
+    return {"message": "Password updated successfully"}

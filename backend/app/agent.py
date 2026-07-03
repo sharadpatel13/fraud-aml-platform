@@ -1,5 +1,8 @@
 import ollama
 from sqlalchemy.orm import Session
+import requests
+from requests.auth import HTTPBasicAuth
+from app.config import settings
 
 from app import models
 
@@ -74,6 +77,36 @@ def determine_recommendation(alerts: list, score_classification: str) -> str:
     return "flag for further review"
 
 
+def create_jira_ticket(summary: str, description: str) -> dict:
+    if not settings.jira_base_url or not settings.jira_api_token:
+        return {"error": "Jira not configured"}
+
+    url = f"{settings.jira_base_url}/rest/api/3/issue"
+    payload = {
+        "fields": {
+            "project": {"key": settings.jira_project_key},
+            "summary": summary,
+            "description": {
+                "type": "doc",
+                "version": 1,
+                "content": [{"type": "paragraph", "content": [{"type": "text", "text": description}]}],
+            },
+            "issuetype": {"name": "Task"},
+        }
+    }
+    response = requests.post(
+        url, json=payload,
+        auth=HTTPBasicAuth(settings.jira_email, settings.jira_api_token),
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        timeout=10,
+    )
+    if response.status_code >= 300:
+        return {"error": f"Jira API error {response.status_code}"}
+    key = response.json()["key"]
+    return {"ticket_key": key, "url": f"{settings.jira_base_url}/browse/{key}"}
+
+
+
 def investigate(db: Session, transaction_id: int) -> str:
     """Gathers facts deterministically (Python decides what happened and what
     should happen next), then asks a local LLM only to phrase it as prose.
@@ -88,6 +121,17 @@ def investigate(db: Session, transaction_id: int) -> str:
 
     score_classification = classify_score(score_data.get("fraud_score", 0))
     recommendation = determine_recommendation(alert_data["alerts"], score_classification)
+
+    jira_ticket = None
+    if recommendation == "escalate for manual review":
+        jira_ticket = create_jira_ticket(
+        summary=f"AML Escalation — Transaction #{transaction_id} ({txn['account_id']})",
+        description=(
+            f"Auto-filed by AI agent.\n\nAmount: ${txn['amount']}\nCountry: {txn['country_code']}\n"
+            f"Fraud score: {score_data.get('fraud_score')} ({score_classification})\n"
+            f"AML alerts: {alert_data['alerts']}"
+        ),
+    )
 
     facts = f"""
 Transaction: {txn}
@@ -126,4 +170,4 @@ Required recommendation (do not change this): {recommendation}
         ],
     )
 
-    return response["message"]["content"]
+    return {"report": response["message"]["content"], "jira_ticket": jira_ticket}
