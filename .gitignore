@@ -1,0 +1,16 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Node
+node_modules/
+dist/
+
+# Data (large files, don't belong in git)
+data/*.csv
+
+# OS
+.DS_Store
+Thumbs.db
