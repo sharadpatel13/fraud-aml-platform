@@ -26,16 +26,21 @@ def check_high_risk_country(transaction: models.Transaction) -> dict | None:
 def check_structuring(db: Session, transaction: models.Transaction) -> dict | None:
     """Flags an account making multiple transactions, each individually
     under the reporting threshold, that add up suspiciously within a
-    short window — a classic technique to evade reporting requirements."""
+    short window - a classic technique to evade reporting requirements.
+
+    The window is centered on the transaction being checked (not purely
+    backward-looking), so the pattern is caught regardless of which
+    transaction in a cluster happens to be scanned first."""
 
     window_start = transaction.Timestamp - timedelta(hours=STRUCTURING_WINDOW_HOURS)
+    window_end = transaction.Timestamp + timedelta(hours=STRUCTURING_WINDOW_HOURS)
 
     recent_txns = (
         db.query(models.Transaction)
         .filter(
             models.Transaction.AccountId == transaction.AccountId,
             models.Transaction.Timestamp >= window_start,
-            models.Transaction.Timestamp <= transaction.Timestamp,
+            models.Transaction.Timestamp <= window_end,
             models.Transaction.Amount < STRUCTURING_THRESHOLD,
         )
         .all()
@@ -48,7 +53,7 @@ def check_structuring(db: Session, transaction: models.Transaction) -> dict | No
             "severity": "HIGH",
             "reason": (
                 f"{len(recent_txns)} transactions under ${STRUCTURING_THRESHOLD} "
-                f"within {STRUCTURING_WINDOW_HOURS}h, totaling ${total}"
+                f"within a {STRUCTURING_WINDOW_HOURS}h window, totaling ${total}"
             ),
         }
     return None
