@@ -6,6 +6,7 @@ from datetime import datetime
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import models, schemas, auth, ml_utils, aml_rules, agent 
@@ -171,25 +172,53 @@ def investigate_transaction(
 
 
 @app.get("/transactions")
-def list_transactions(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    transactions = db.query(models.Transaction).all()
+def list_transactions(
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    latest_scores = {}
+    for s in db.query(models.FraudScore).order_by(models.FraudScore.ScoredAt.desc()).all():
+        if s.TransactionId not in latest_scores:
+            latest_scores[s.TransactionId] = float(s.FraudScore)
+
+    alert_counts = {}
+    for txn_id, count in (
+        db.query(models.AMLAlert.TransactionId, func.count(models.AMLAlert.AlertId))
+        .group_by(models.AMLAlert.TransactionId)
+        .all()
+    ):
+        alert_counts[txn_id] = count
+
+    scored_or_flagged_ids = set(latest_scores.keys()) | set(alert_counts.keys())
+
+    priority_txns = (
+        db.query(models.Transaction)
+        .filter(models.Transaction.TransactionId.in_(scored_or_flagged_ids))
+        .all()
+    )
+    remaining = max(0, limit - len(priority_txns))
+    other_txns = (
+        db.query(models.Transaction)
+        .filter(~models.Transaction.TransactionId.in_(scored_or_flagged_ids))
+        .order_by(models.Transaction.TransactionId)
+        .limit(remaining)
+        .all()
+        if remaining > 0 else []
+    )
+
     result = []
-    for t in transactions:
-        score = (
-            db.query(models.FraudScore)
-            .filter(models.FraudScore.TransactionId == t.TransactionId)
-            .order_by(models.FraudScore.ScoredAt.desc())
-            .first()
-        )
-        alerts = db.query(models.AMLAlert).filter(models.AMLAlert.TransactionId == t.TransactionId).all()
+    for t in priority_txns + other_txns:
         result.append({
             "transaction_id": t.TransactionId,
             "account_id": t.AccountId,
             "amount": float(t.Amount),
             "country_code": t.CountryCode,
-            "fraud_score": float(score.FraudScore) if score else None,
-            "aml_alert_count": len(alerts),
+            "fraud_score": latest_scores.get(t.TransactionId),
+            "aml_alert_count": alert_counts.get(t.TransactionId, 0),
         })
+
+    result.sort(key=lambda r: (-r["aml_alert_count"], -(r["fraud_score"] or -1)))
     return result
 
 

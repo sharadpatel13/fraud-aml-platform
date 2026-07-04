@@ -105,7 +105,25 @@ def create_jira_ticket(summary: str, description: str) -> dict:
     key = response.json()["key"]
     return {"ticket_key": key, "url": f"{settings.jira_base_url}/browse/{key}"}
 
+def find_existing_ticket(transaction_id: int) -> dict | None:
+    """Checks whether a Jira ticket already exists for this transaction,
+    to avoid filing duplicates on repeated investigations."""
+    if not settings.jira_base_url or not settings.jira_api_token:
+        return None
 
+    jql = f'project = {settings.jira_project_key} AND summary ~ "Transaction #{transaction_id} "'
+    url = f"{settings.jira_base_url}/rest/api/3/search/jql"
+    response = requests.get(
+        url,
+        params={"jql": jql, "maxResults": 1, "fields": "summary"},
+        auth=HTTPBasicAuth(settings.jira_email, settings.jira_api_token),
+        headers={"Accept": "application/json"},
+        timeout=10,
+    )
+    if response.status_code == 200 and response.json().get("issues"):
+        issue = response.json()["issues"][0]
+        return {"ticket_key": issue["key"], "url": f"{settings.jira_base_url}/browse/{issue['key']}"}
+    return None
 
 def investigate(db: Session, transaction_id: int) -> str:
     """Gathers facts deterministically (Python decides what happened and what
@@ -124,14 +142,16 @@ def investigate(db: Session, transaction_id: int) -> str:
 
     jira_ticket = None
     if recommendation == "escalate for manual review":
-        jira_ticket = create_jira_ticket(
-        summary=f"AML Escalation — Transaction #{transaction_id} ({txn['account_id']})",
-        description=(
-            f"Auto-filed by AI agent.\n\nAmount: ${txn['amount']}\nCountry: {txn['country_code']}\n"
-            f"Fraud score: {score_data.get('fraud_score')} ({score_classification})\n"
-            f"AML alerts: {alert_data['alerts']}"
-        ),
-    )
+        jira_ticket = find_existing_ticket(transaction_id)
+        if not jira_ticket:
+            jira_ticket = create_jira_ticket(
+                summary=f"AML Escalation — Transaction #{transaction_id} ({txn['account_id']})",
+                description=(
+                    f"Auto-filed by AI agent.\n\nAmount: ${txn['amount']}\nCountry: {txn['country_code']}\n"
+                    f"Fraud score: {score_data.get('fraud_score')} ({score_classification})\n"
+                    f"AML alerts: {alert_data['alerts']}"
+                ),
+            )
 
     facts = f"""
 Transaction: {txn}
