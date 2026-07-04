@@ -8,23 +8,26 @@ model = joblib.load(MODEL_PATH)
 FEATURE_COLUMNS = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
 
 
-def build_feature_vector(transaction_id: int, amount: float) -> np.ndarray:
-    """Builds a 30-value feature vector matching what the model was trained on.
+def build_feature_vector(transaction_id: int, amount: float, ml_features: str | None = None) -> np.ndarray:
+    """Builds the 30-value feature vector the model expects.
 
-    Amount is real. Time and V1-V28 are deterministic placeholder values,
-    seeded from the transaction ID — a stand-in for the real bank-internal
-    PCA features we don't have access to, since Kaggle's V1-V28 came from
-    a feature pipeline that isn't publicly available. Seeding by ID keeps
-    scores reproducible rather than random on every call.
-    """
+    If real engineered features are available (ml_features, sourced from
+    the Kaggle dataset via MLFeatures column), use them - this is genuine
+    scoring. Otherwise fall back to a deterministic placeholder, seeded by
+    transaction ID, for any transaction that never had real features
+    attached (e.g. manually typed test rows)."""
+    if ml_features:
+        values = [float(x) for x in ml_features.split(",")]
+        return np.array(values + [amount]).reshape(1, -1)
+
     rng = np.random.default_rng(seed=transaction_id)
     v_features = rng.normal(loc=0, scale=1, size=28)
     time_value = 0.0
     return np.array([time_value, *v_features, amount]).reshape(1, -1)
 
 
-def score_transaction(transaction_id: int, amount: float) -> dict:
-    features = build_feature_vector(transaction_id, amount)
+def score_transaction(transaction_id: int, amount: float, ml_features: str | None = None) -> dict:
+    features = build_feature_vector(transaction_id, amount, ml_features)
     probability = model.predict_proba(features)[0][1]
     fraud_score = round(float(probability) * 100, 2)
 

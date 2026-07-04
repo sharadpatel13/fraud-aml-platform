@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DECIMAL, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DECIMAL, DateTime, ForeignKey, Text
 from sqlalchemy.sql import func
 
 from app.database import Base
@@ -26,6 +26,9 @@ class Transaction(Base):
     Timestamp = Column(DateTime, nullable=False)
     UploadedAt = Column(DateTime, server_default=func.now())
     UploadedBy = Column(Integer, ForeignKey("Users.UserId"))
+    MLFeatures = Column(Text)
+    TrueLabel = Column(Integer)
+
 
 class FraudScore(Base):
     __tablename__ = "FraudScores"

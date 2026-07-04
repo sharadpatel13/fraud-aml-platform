@@ -92,6 +92,8 @@ def upload_transactions(
                 TransactionType=row["TransactionType"],
                 Timestamp=datetime.fromisoformat(row["Timestamp"]),
                 UploadedBy=current_user.UserId,
+                MLFeatures=row.get("MLFeatures") or None,
+                TrueLabel=int(row["TrueLabel"]) if row.get("TrueLabel") not in (None, "") else None,
             )
             db.add(txn)
             accepted += 1
@@ -113,7 +115,7 @@ def predict_fraud(
     if not txn:
         raise HTTPException(status_code=404, detail="Transaction not found")
 
-    result = ml_utils.score_transaction(transaction_id, float(txn.Amount))
+    result = ml_utils.score_transaction(transaction_id, float(txn.Amount), txn.MLFeatures)
 
     score_record = models.FraudScore(
         TransactionId=transaction_id,
