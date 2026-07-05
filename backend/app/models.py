@@ -28,6 +28,7 @@ class Transaction(Base):
     UploadedBy = Column(Integer, ForeignKey("Users.UserId"))
     MLFeatures = Column(Text)
     TrueLabel = Column(Integer)
+    JiraTicketKey = Column(String(50))
 
 
 class FraudScore(Base):

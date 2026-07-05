@@ -105,33 +105,20 @@ def create_jira_ticket(summary: str, description: str) -> dict:
     key = response.json()["key"]
     return {"ticket_key": key, "url": f"{settings.jira_base_url}/browse/{key}"}
 
-def find_existing_ticket(transaction_id: int) -> dict | None:
-    """Checks whether a Jira ticket already exists for this transaction,
-    to avoid filing duplicates on repeated investigations."""
-    if not settings.jira_base_url or not settings.jira_api_token:
-        return None
 
-    jql = f'project = {settings.jira_project_key} AND summary ~ "Transaction #{transaction_id} "'
-    url = f"{settings.jira_base_url}/rest/api/3/search/jql"
-    response = requests.get(
-        url,
-        params={"jql": jql, "maxResults": 1, "fields": "summary"},
-        auth=HTTPBasicAuth(settings.jira_email, settings.jira_api_token),
-        headers={"Accept": "application/json"},
-        timeout=10,
-    )
-    if response.status_code == 200 and response.json().get("issues"):
-        issue = response.json()["issues"][0]
-        return {"ticket_key": issue["key"], "url": f"{settings.jira_base_url}/browse/{issue['key']}"}
-    return None
-
-def investigate(db: Session, transaction_id: int) -> str:
+def investigate(db: Session, transaction_id: int) -> dict:
     """Gathers facts deterministically (Python decides what happened and what
     should happen next), then asks a local LLM only to phrase it as prose.
     This split exists because small local models are reliable at writing
-    clear sentences but not reliable at multi-step decision logic — so we
-    don't ask them to do the second thing."""
+    clear sentences but not reliable at multi-step decision logic - so we
+    don't ask them to do the second thing.
 
+    Jira ticket deduplication is tracked via the Transactions.JiraTicketKey
+    column (not by searching Jira) - Jira's search index updates
+    asynchronously, so a search-based check can miss a ticket created
+    moments earlier. Our own database is instantly consistent."""
+
+    txn_record = db.query(models.Transaction).filter(models.Transaction.TransactionId == transaction_id).first()
     txn = get_transaction(db, transaction_id)
     score_data = get_fraud_score(db, transaction_id)
     alert_data = get_aml_alerts(db, transaction_id)
@@ -142,8 +129,12 @@ def investigate(db: Session, transaction_id: int) -> str:
 
     jira_ticket = None
     if recommendation == "escalate for manual review":
-        jira_ticket = find_existing_ticket(transaction_id)
-        if not jira_ticket:
+        if txn_record.JiraTicketKey:
+            jira_ticket = {
+                "ticket_key": txn_record.JiraTicketKey,
+                "url": f"{settings.jira_base_url}/browse/{txn_record.JiraTicketKey}",
+            }
+        else:
             jira_ticket = create_jira_ticket(
                 summary=f"AML Escalation — Transaction #{transaction_id} ({txn['account_id']})",
                 description=(
@@ -152,6 +143,9 @@ def investigate(db: Session, transaction_id: int) -> str:
                     f"AML alerts: {alert_data['alerts']}"
                 ),
             )
+            if jira_ticket and "ticket_key" in jira_ticket:
+                txn_record.JiraTicketKey = jira_ticket["ticket_key"]
+                db.commit()
 
     facts = f"""
 Transaction: {txn}
