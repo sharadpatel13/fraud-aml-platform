@@ -97,6 +97,22 @@ def upload_transactions(
                 TrueLabel=int(row["TrueLabel"]) if row.get("TrueLabel") not in (None, "") else None,
             )
             db.add(txn)
+            db.flush()  # assigns txn.TransactionId before we use it below
+
+            result = ml_utils.score_transaction(txn.TransactionId, float(txn.Amount), txn.MLFeatures)
+            db.add(models.FraudScore(
+                TransactionId=txn.TransactionId,
+                FraudScore=result["fraud_score"],
+                TopFeatures=result["top_features"],
+            ))
+            alerts = aml_rules.run_all_rules(db, txn)
+            for alert in alerts:
+                db.add(models.AMLAlert(
+                    TransactionId=txn.TransactionId,
+                    RuleTriggered=alert["rule"],
+                    Severity=alert["severity"],
+                ))
+
             accepted += 1
         except (ValueError, KeyError) as e:
             rejected += 1
@@ -170,57 +186,86 @@ def investigate_transaction(
         "jira_ticket": result["jira_ticket"],
     }
 
-
 @app.get("/transactions")
 def list_transactions(
-    limit: int = 200,
+    page: int = 1,
+    page_size: int = 300,
+    risk_level: str | None = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    latest_scores = {}
-    for s in db.query(models.FraudScore).order_by(models.FraudScore.ScoredAt.desc()).all():
-        if s.TransactionId not in latest_scores:
-            latest_scores[s.TransactionId] = float(s.FraudScore)
+    latest_score_subq = (
+        db.query(
+            models.FraudScore.TransactionId,
+            func.max(models.FraudScore.ScoredAt).label("max_scored_at"),
+        )
+        .group_by(models.FraudScore.TransactionId)
+        .subquery()
+    )
 
-    alert_counts = {}
-    for txn_id, count in (
-        db.query(models.AMLAlert.TransactionId, func.count(models.AMLAlert.AlertId))
+    alert_count_subq = (
+        db.query(
+            models.AMLAlert.TransactionId,
+            func.count(models.AMLAlert.AlertId).label("alert_count"),
+        )
         .group_by(models.AMLAlert.TransactionId)
-        .all()
-    ):
-        alert_counts[txn_id] = count
-
-    scored_or_flagged_ids = set(latest_scores.keys()) | set(alert_counts.keys())
-
-    priority_txns = (
-        db.query(models.Transaction)
-        .filter(models.Transaction.TransactionId.in_(scored_or_flagged_ids))
-        .all()
-    )
-    remaining = max(0, limit - len(priority_txns))
-    other_txns = (
-        db.query(models.Transaction)
-        .filter(~models.Transaction.TransactionId.in_(scored_or_flagged_ids))
-        .order_by(models.Transaction.TransactionId)
-        .limit(remaining)
-        .all()
-        if remaining > 0 else []
+        .subquery()
     )
 
-    result = []
-    for t in priority_txns + other_txns:
-        result.append({
+    base_query = (
+        db.query(
+            models.Transaction,
+            models.FraudScore.FraudScore,
+            alert_count_subq.c.alert_count,
+        )
+        .outerjoin(latest_score_subq, models.Transaction.TransactionId == latest_score_subq.c.TransactionId)
+        .outerjoin(
+            models.FraudScore,
+            (models.FraudScore.TransactionId == latest_score_subq.c.TransactionId)
+            & (models.FraudScore.ScoredAt == latest_score_subq.c.max_scored_at),
+        )
+        .outerjoin(alert_count_subq, models.Transaction.TransactionId == alert_count_subq.c.TransactionId)
+    )
+
+    if risk_level == "high":
+        base_query = base_query.filter(alert_count_subq.c.alert_count > 0)
+    elif risk_level == "medium":
+        base_query = base_query.filter(
+            alert_count_subq.c.alert_count.is_(None),
+            models.FraudScore.FraudScore >= 30,
+            models.FraudScore.FraudScore < 70,
+        )
+    elif risk_level == "low":
+        base_query = base_query.filter(
+            alert_count_subq.c.alert_count.is_(None),
+            models.FraudScore.FraudScore < 30,
+        )
+    elif risk_level == "not_scored":
+        base_query = base_query.filter(models.FraudScore.FraudScore.is_(None))
+
+    total = base_query.count()
+    offset = (page - 1) * page_size
+
+    rows = (
+        base_query
+        .order_by(alert_count_subq.c.alert_count.desc(), models.FraudScore.FraudScore.desc())
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+
+    items = []
+    for t, fraud_score, alert_count in rows:
+        items.append({
             "transaction_id": t.TransactionId,
             "account_id": t.AccountId,
             "amount": float(t.Amount),
             "country_code": t.CountryCode,
-            "fraud_score": latest_scores.get(t.TransactionId),
-            "aml_alert_count": alert_counts.get(t.TransactionId, 0),
+            "fraud_score": float(fraud_score) if fraud_score is not None else None,
+            "aml_alert_count": int(alert_count) if alert_count is not None else 0,
         })
 
-    result.sort(key=lambda r: (-r["aml_alert_count"], -(r["fraud_score"] or -1)))
-    return result
-
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 @app.post("/auth/forgot-password", response_model=schemas.ForgotPasswordResponse)
 def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depends(get_db)):
@@ -249,3 +294,10 @@ def change_password(
     current_user.PasswordHash = auth.hash_password(payload.new_password)
     db.commit()
     return {"message": "Password updated successfully"}
+
+@app.get("/transactions/stats")
+def transaction_stats(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    total = db.query(func.count(models.Transaction.TransactionId)).scalar()
+    scored = db.query(func.count(func.distinct(models.FraudScore.TransactionId))).scalar()
+    flagged = db.query(func.count(func.distinct(models.AMLAlert.TransactionId))).scalar()
+    return {"total": total, "scored": scored, "flagged": flagged}
