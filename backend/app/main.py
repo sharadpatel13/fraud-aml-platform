@@ -113,6 +113,9 @@ def upload_transactions(
                     Severity=alert["severity"],
                 ))
 
+            txn.LatestFraudScore = result["fraud_score"]
+            txn.AMLAlertCount = len(alerts)
+
             accepted += 1
         except (ValueError, KeyError) as e:
             rejected += 1
@@ -140,6 +143,7 @@ def predict_fraud(
         TopFeatures=result["top_features"],
     )
     db.add(score_record)
+    txn.LatestFraudScore = result["fraud_score"]
     db.commit()
 
     return {
@@ -166,6 +170,7 @@ def check_aml_rules(
             RuleTriggered=alert["rule"],
             Severity=alert["severity"],
         ))
+    txn.AMLAlertCount = db.query(models.AMLAlert).filter(models.AMLAlert.TransactionId == transaction_id).count()
     db.commit()
 
     return {"transaction_id": transaction_id, "alerts_triggered": len(alerts), "alerts": alerts}
@@ -194,75 +199,44 @@ def list_transactions(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    latest_score_subq = (
-        db.query(
-            models.FraudScore.TransactionId,
-            func.max(models.FraudScore.ScoredAt).label("max_scored_at"),
-        )
-        .group_by(models.FraudScore.TransactionId)
-        .subquery()
-    )
-
-    alert_count_subq = (
-        db.query(
-            models.AMLAlert.TransactionId,
-            func.count(models.AMLAlert.AlertId).label("alert_count"),
-        )
-        .group_by(models.AMLAlert.TransactionId)
-        .subquery()
-    )
-
-    base_query = (
-        db.query(
-            models.Transaction,
-            models.FraudScore.FraudScore,
-            alert_count_subq.c.alert_count,
-        )
-        .outerjoin(latest_score_subq, models.Transaction.TransactionId == latest_score_subq.c.TransactionId)
-        .outerjoin(
-            models.FraudScore,
-            (models.FraudScore.TransactionId == latest_score_subq.c.TransactionId)
-            & (models.FraudScore.ScoredAt == latest_score_subq.c.max_scored_at),
-        )
-        .outerjoin(alert_count_subq, models.Transaction.TransactionId == alert_count_subq.c.TransactionId)
-    )
+    query = db.query(models.Transaction)
 
     if risk_level == "high":
-        base_query = base_query.filter(alert_count_subq.c.alert_count > 0)
+        query = query.filter(models.Transaction.AMLAlertCount > 0)
     elif risk_level == "medium":
-        base_query = base_query.filter(
-            alert_count_subq.c.alert_count.is_(None),
-            models.FraudScore.FraudScore >= 30,
-            models.FraudScore.FraudScore < 70,
+        query = query.filter(
+            models.Transaction.AMLAlertCount == 0,
+            models.Transaction.LatestFraudScore >= 30,
+            models.Transaction.LatestFraudScore < 70,
         )
     elif risk_level == "low":
-        base_query = base_query.filter(
-            alert_count_subq.c.alert_count.is_(None),
-            models.FraudScore.FraudScore < 30,
+        query = query.filter(
+            models.Transaction.AMLAlertCount == 0,
+            models.Transaction.LatestFraudScore < 30,
         )
     elif risk_level == "not_scored":
-        base_query = base_query.filter(models.FraudScore.FraudScore.is_(None))
+        query = query.filter(models.Transaction.LatestFraudScore.is_(None))
 
-    total = base_query.count()
+    total = query.count()
     offset = (page - 1) * page_size
 
     rows = (
-        base_query
-        .order_by(alert_count_subq.c.alert_count.desc(), models.FraudScore.FraudScore.desc())
+        query
+        .order_by(models.Transaction.AMLAlertCount.desc(), models.Transaction.LatestFraudScore.desc())
         .offset(offset)
         .limit(page_size)
         .all()
     )
 
     items = []
-    for t, fraud_score, alert_count in rows:
+    for t in rows:
         items.append({
             "transaction_id": t.TransactionId,
             "account_id": t.AccountId,
             "amount": float(t.Amount),
             "country_code": t.CountryCode,
-            "fraud_score": float(fraud_score) if fraud_score is not None else None,
-            "aml_alert_count": int(alert_count) if alert_count is not None else 0,
+            "fraud_score": float(t.LatestFraudScore) if t.LatestFraudScore is not None else None,
+            "aml_alert_count": t.AMLAlertCount,
         })
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}

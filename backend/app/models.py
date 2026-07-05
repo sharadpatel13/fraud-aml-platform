@@ -29,6 +29,8 @@ class Transaction(Base):
     MLFeatures = Column(Text)
     TrueLabel = Column(Integer)
     JiraTicketKey = Column(String(50))
+    LatestFraudScore = Column(DECIMAL(5, 2))
+    AMLAlertCount = Column(Integer, default=0)
 
 
 class FraudScore(Base):
